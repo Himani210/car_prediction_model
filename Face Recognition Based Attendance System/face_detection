@@ -1,0 +1,198 @@
+from flask import Flask, render_template, request, session, redirect, url_for
+import cv2
+import numpy as np
+import face_recognition
+import os
+from datetime import datetime
+from plyer import notification
+
+
+import smtplib
+from email.message import EmailMessage
+
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'
+
+# Path to folder containing user images and details
+IMAGE_FOLDER = 'ImagesBasic'
+app.config['UPLOAD_FOLDER'] = IMAGE_FOLDER
+
+# Load images and encodings
+def load_images_and_encodings(folder):
+    images = []
+    classNames = []
+    myList = os.listdir(folder)
+    for cl in myList:
+        curImg = cv2.imread(os.path.join(folder, cl))
+        images.append(curImg)
+        classNames.append(os.path.splitext(cl)[0])
+    encodeListKnown = findEncodings(images)
+    return classNames, encodeListKnown
+
+# Function to find face encodings
+def findEncodings(images):
+    encodeList = []
+    for img in images:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        face_locations = face_recognition.face_locations(img)
+        if face_locations:  # Check if any faces are detected
+            encode = face_recognition.face_encodings(img)[0]
+            encodeList.append(encode)
+    return encodeList
+
+
+classNames, encodeListKnown = load_images_and_encodings(app.config['UPLOAD_FOLDER'])
+
+# Function to mark attendance
+def markAttendance(name):
+    with open('Attendance.csv', 'a+') as f:
+        f.seek(0)
+        myDataList = f.readlines()
+        nameList = [line.split(',')[0] for line in myDataList]
+        if name not in nameList:
+            now = datetime.now()
+            dtString = now.strftime('%H:%M:%S')
+            f.write(f'\n{name},{dtString}')
+            notification_title = "Intruder Detected"
+            notification_message = f"Face detected: {name}"
+            notification_timeout = 5
+            notification.notify(
+                title=notification_title,
+                message=notification_message,
+                timeout=notification_timeout
+            )
+
+# Flask routes
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if request.method == 'POST':
+        file = request.files['file']
+        if file:
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
+            # Reload images and encodings
+            global classNames, encodeListKnown
+            classNames, encodeListKnown = load_images_and_encodings(app.config['UPLOAD_FOLDER'])
+            return 'File uploaded successfully'
+
+#@app.route('/detect', methods=['GET', 'POST'])
+#def detect_faces():
+#    if request.method == 'POST':
+#        session['detecting'] = True  # Set detecting flag to True
+#        return redirect(url_for('face_detection'))
+#    return render_template('detect.html')
+
+@app.route('/detect', methods=['GET', 'POST'])
+def detect_faces():
+    if request.method == 'POST':
+        if 'detecting' not in session or not session['detecting']:  # Check if detection is not already in progress
+            session['detecting'] = True  # Set detecting flag to True
+            return redirect(url_for('face_detection'))
+        else:
+            return "Face detection is already in progress. Please wait until it finishes."
+    return render_template('detect.html')
+
+
+@app.route('/face_detection')
+def face_detection():
+    if 'detecting' in session and session['detecting']:
+        cap = cv2.VideoCapture(0)
+        while session['detecting']:
+            success, img = cap.read()
+            imgS = cv2.resize(img, (0, 0), None, 0.25, 0.25)
+            imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
+
+            facesCurFrame = face_recognition.face_locations(imgS)
+            encodesCurFrame = face_recognition.face_encodings(imgS, facesCurFrame)
+
+            for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
+                matches = face_recognition.compare_faces(encodeListKnown, encodeFace)
+                faceDis = face_recognition.face_distance(encodeListKnown, encodeFace)
+                matchIndex = np.argmin(faceDis)
+
+                if matches[matchIndex]:
+                    name = classNames[matchIndex].upper()
+                    y1, x2, y2, x1 = faceLoc
+                    y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
+                    cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+                    markAttendance(name)
+
+            cv2.imshow('Webcam', img)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    return redirect(url_for('detect_faces'))
+
+@app.route('/stop_detection', methods=['POST'])
+def stop_detection():
+    session['detecting'] = False  # Set detecting flag to False
+    return redirect(url_for('detect_faces'))
+
+
+
+
+import csv
+
+def markAttendance(name):
+    with open('Attendance.csv', 'a+', newline='') as f:
+        writer = csv.writer(f)
+        now = datetime.now()
+        dtString = now.strftime('%H:%M:%S')
+        writer.writerow([name, dtString])
+
+        # Send notification
+        notification_title = "Attendance Marked"
+        notification_message = f"Attendance marked for: {name}"
+        notification_timeout = 2
+        notification.notify(
+            title=notification_title,
+            message=notification_message,
+            timeout=notification_timeout
+        )
+
+
+def send_email_with_csv(to_email):
+    # Create EmailMessage object
+    msg = EmailMessage()
+    msg['Subject'] = 'Attendance Report'
+    msg['From'] = 'himanimunjal210@gmail.com'
+   # msg['To'] = 'himanimunjal210@gmail.com'
+    msg.set_content('Please find the attached attendance CSV file.')
+
+    # Attach attendance CSV file
+    with open('Attendance.csv', 'rb') as f:
+        file_data = f.read()
+        msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename='Attendance.csv')
+
+    # Send email
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login('himanimunjal210@gmail.com', 'S@njay123')
+        smtp.send_message(msg)
+
+
+
+
+
+@app.route('/send_email', methods=['GET', 'POST'])
+def send_email():
+    if request.method == 'POST':
+        to_email = request.form['email']  # Get email address from form input
+        # Call the function to send email with the provided email address
+        send_email_with_csv(to_email)
+        return 'Email sent successfully!'
+    return render_template('email_form.html')
+
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
